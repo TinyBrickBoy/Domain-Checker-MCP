@@ -24,6 +24,7 @@ Host the server behind HTTPS (e.g. nginx + Let's Encrypt), then in Claude.ai go 
 
 - **URL:** `https://mcp.domainchecker.itestit.de/mcp`
 
-## Tool
+## Tools
 
 - `check_domain(domain)` – returns whether the domain is available and whether it is a premium domain.
+- `suggest_domains(keyword, tlds?, limit?, check_availability?)` – generates domain name ideas based on a keyword using the Datamuse API. Optionally checks availability of each suggestion via the Skrime API.
