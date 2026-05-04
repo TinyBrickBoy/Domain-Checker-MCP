@@ -37,6 +37,27 @@ function createMcpServer() {
         },
       },
       {
+        name: "check_domains",
+        description:
+          "Checks availability of multiple domains in parallel via the Skrime API.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            domains: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "List of domains including TLD, e.g. ['a.com','b.io']. Max 50.",
+            },
+            concurrency: {
+              type: "number",
+              description: "Max parallel requests (default 5, max 20).",
+            },
+          },
+          required: ["domains"],
+        },
+      },
+      {
         name: "suggest_domains",
         description:
           "Generates domain name ideas based on a keyword using the Datamuse API. Optionally checks availability of each suggestion via the Skrime API.",
@@ -73,6 +94,9 @@ function createMcpServer() {
 
     if (toolName === "check_domain") {
       return handleCheckDomain(request.params.arguments);
+    }
+    if (toolName === "check_domains") {
+      return handleCheckDomains(request.params.arguments);
     }
     if (toolName === "suggest_domains") {
       return handleSuggestDomains(request.params.arguments);
@@ -125,6 +149,74 @@ async function handleCheckDomain(args) {
       isError: true,
     };
   }
+}
+
+function isValidDomain(d) {
+  return typeof d === "string" && d.includes(".") && !/\s/.test(d);
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      results[i] = await worker(items[i], i);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
+async function handleCheckDomains(args) {
+  const raw = Array.isArray(args?.domains) ? args.domains : [];
+  const domains = [...new Set(raw.map((d) => String(d ?? "").trim().toLowerCase()).filter(Boolean))];
+
+  if (domains.length === 0) {
+    return {
+      content: [{ type: "text", text: "Missing 'domains' (non-empty array)." }],
+      isError: true,
+    };
+  }
+  if (domains.length > 50) {
+    return {
+      content: [{ type: "text", text: `Too many domains (${domains.length}). Max 50.` }],
+      isError: true,
+    };
+  }
+
+  const concurrency = Math.min(Math.max(Number(args?.concurrency) || 5, 1), 20);
+
+  const results = await runWithConcurrency(domains, concurrency, async (domain) => {
+    if (!isValidDomain(domain)) {
+      return { domain, line: `⚠️  ${domain} (invalid)` };
+    }
+    try {
+      const data = await checkDomainAvailability(domain);
+      const icon = data.available ? "✅" : "❌";
+      const premium = data.premium ? " 💎" : "";
+      return {
+        domain,
+        available: data.available,
+        premium: !!data.premium,
+        line: `${icon} ${data.domain}${premium}`,
+      };
+    } catch (err) {
+      return { domain, error: err.message, line: `⚠️  ${domain} (${err.message})` };
+    }
+  });
+
+  const available = results.filter((r) => r.available).length;
+  const taken = results.filter((r) => r.available === false).length;
+  const errors = results.filter((r) => r.error || r.line.startsWith("⚠️")).length;
+
+  const summary = `Checked ${results.length} domain(s): ✅ ${available} available · ❌ ${taken} taken · ⚠️ ${errors} error(s)`;
+  const body = results.map((r) => r.line).join("\n");
+
+  return {
+    content: [{ type: "text", text: `${summary}\n\n${body}` }],
+  };
 }
 
 function sanitizeLabel(word) {
