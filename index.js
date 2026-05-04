@@ -22,13 +22,13 @@ function createMcpServer() {
     tools: [
       {
         name: "check_domain",
-        description: "Prüft die Verfügbarkeit einer Domain über die Skrime-API.",
+        description: "Checks domain availability via the Skrime API.",
         inputSchema: {
           type: "object",
           properties: {
             domain: {
               type: "string",
-              description: "Domain inkl. TLD, z. B. 'beispiel.de'",
+              description: "Domain including TLD, e.g. 'example.com'",
             },
           },
           required: ["domain"],
@@ -42,7 +42,7 @@ function createMcpServer() {
 
     if (!domain || !domain.includes(".") || /\s/.test(domain)) {
       return {
-        content: [{ type: "text", text: `Ungültige Domain: '${domain}'` }],
+        content: [{ type: "text", text: `Invalid domain: '${domain}'` }],
         isError: true,
       };
     }
@@ -56,7 +56,7 @@ function createMcpServer() {
 
       if (!response.ok) {
         return {
-          content: [{ type: "text", text: `API-Fehler: HTTP ${response.status}` }],
+          content: [{ type: "text", text: `API error: HTTP ${response.status}` }],
           isError: true,
         };
       }
@@ -66,22 +66,22 @@ function createMcpServer() {
 
       if (payload?.state !== "success" || !data) {
         return {
-          content: [{ type: "text", text: `API meldet keinen Erfolg: ${JSON.stringify(payload)}` }],
+          content: [{ type: "text", text: `API did not report success: ${JSON.stringify(payload)}` }],
           isError: true,
         };
       }
 
       const status = data.available
-        ? `✅ '${data.domain}' ist VERFÜGBAR.`
-        : `❌ '${data.domain}' ist NICHT verfügbar.`;
-      const premium = data.premium ? "\n💎 Premium-Domain." : "";
+        ? `✅ '${data.domain}' is AVAILABLE.`
+        : `❌ '${data.domain}' is NOT available.`;
+      const premium = data.premium ? "\n💎 Premium domain." : "";
 
       return {
         content: [{ type: "text", text: status + premium }],
       };
     } catch (err) {
       return {
-        content: [{ type: "text", text: `Verbindungsfehler: ${err.message}` }],
+        content: [{ type: "text", text: `Connection error: ${err.message}` }],
         isError: true,
       };
     }
@@ -127,7 +127,7 @@ app.post("/mcp", async (req, res) => {
 async function handleSession(req, res) {
   const sessionId = req.headers["mcp-session-id"];
   if (!sessionId || !transports.has(sessionId)) {
-    return res.status(400).send("Ungültige Session-ID");
+    return res.status(400).send("Invalid session ID");
   }
   await transports.get(sessionId).handleRequest(req, res);
 }
@@ -136,5 +136,5 @@ app.get("/mcp", handleSession);
 app.delete("/mcp", handleSession);
 
 app.listen(PORT, () => {
-  console.log(`Domain Checker MCP läuft auf Port ${PORT}`);
+  console.log(`Domain Checker MCP running on port ${PORT}`);
 });

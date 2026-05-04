@@ -1,6 +1,8 @@
 # Domain Checker MCP
 
-Remote MCP-Server, der über die Skrime-API prüft, ob eine Domain frei ist.
+**Public Instance:** `https://mcp.domainchecker.itestit.de/mcp`
+
+Remote MCP server that checks domain availability via the Skrime API.
 
 ## Installation
 
@@ -9,19 +11,19 @@ npm install
 npm start
 ```
 
-Server läuft dann auf Port `3000` (über `PORT` änderbar).
+The server runs on port `3000` (configurable via `PORT`).
 
 ## Endpoints
 
-- `POST /mcp` – MCP-Endpoint für Claude
+- `POST /mcp` – MCP endpoint for Claude
 - `GET /health` – Healthcheck
 
-## In Claude.ai einbinden
+## Add to Claude.ai
 
-Server hinter HTTPS hosten (z. B. mit nginx + Let's Encrypt), dann in Claude.ai unter **Settings → Connectors → Add custom connector**:
+Host the server behind HTTPS (e.g. nginx + Let's Encrypt), then in Claude.ai go to **Settings → Connectors → Add custom connector**:
 
-- **URL:** `https://deine-domain.tld/mcp`
+- **URL:** `https://mcp.domainchecker.itestit.de/mcp`
 
 ## Tool
 
-- `check_domain(domain)` – gibt zurück, ob die Domain verfügbar und ob sie Premium ist.
+- `check_domain(domain)` – returns whether the domain is available and whether it is a premium domain.
