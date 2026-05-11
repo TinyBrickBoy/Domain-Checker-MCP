@@ -18,6 +18,24 @@ const RDAP_API_URL = "https://rdap.org/domain";
 const DEFAULT_TLDS = ["com", "net", "org", "io", "app", "dev", "ai", "co", "de"];
 const DNS_RECORD_TYPES = ["A", "AAAA", "MX", "TXT", "NS", "CNAME", "SOA", "CAA", "SRV"];
 
+const RATE_LIMIT_CAPACITY = Number(process.env.RATE_LIMIT_CAPACITY) || 60;
+const RATE_LIMIT_REFILL_PER_SEC = Number(process.env.RATE_LIMIT_REFILL_PER_SEC) || 1;
+const MAX_BODY_SIZE = process.env.MAX_BODY_SIZE || "64kb";
+const MAX_NS_PROBES = 10;
+const MAX_DKIM_SELECTORS = 10;
+
+const TOOL_COST = {
+  check_domain: 1,
+  check_domains: 5,
+  suggest_domains: 3,
+  dns_lookup: 1,
+  dns_records: 3,
+  reverse_dns: 1,
+  whois_lookup: 2,
+  check_email_security: 4,
+  check_nameservers: 10,
+};
+
 function createMcpServer() {
   const server = new Server(
     { name: "domain-checker", version: "1.0.0" },
@@ -524,6 +542,12 @@ async function handleDnsLookup(args) {
       isError: true,
     };
   }
+  if (isReverse && isPrivateOrReservedIp(target)) {
+    return {
+      content: [{ type: "text", text: `Refusing PTR for private/reserved IP '${target}'.` }],
+      isError: true,
+    };
+  }
   if (!isReverse && !isValidHostname(target)) {
     return {
       content: [{ type: "text", text: `Invalid domain: '${target}'.` }],
@@ -670,9 +694,11 @@ async function handleCheckEmailSecurity(args) {
     };
   }
 
-  const selectors = Array.isArray(args?.dkim_selectors) && args.dkim_selectors.length > 0
-    ? args.dkim_selectors.map((s) => String(s).trim()).filter(Boolean)
-    : ["default", "google", "selector1", "selector2", "mail", "k1"];
+  const selectors = (
+    Array.isArray(args?.dkim_selectors) && args.dkim_selectors.length > 0
+      ? args.dkim_selectors.map((s) => String(s).trim()).filter(Boolean)
+      : ["default", "google", "selector1", "selector2", "mail", "k1"]
+  ).slice(0, MAX_DKIM_SELECTORS);
 
   const [mxRecords, rootTxt, dmarcTxt, ...dkimResults] = await Promise.all([
     dns.resolveMx(domain).catch(() => []),
@@ -735,6 +761,12 @@ async function handleReverseDns(args) {
   if (net.isIP(ip) === 0) {
     return {
       content: [{ type: "text", text: `Invalid IP: '${ip}'.` }],
+      isError: true,
+    };
+  }
+  if (isPrivateOrReservedIp(ip)) {
+    return {
+      content: [{ type: "text", text: `Refusing PTR for private/reserved IP '${ip}'.` }],
       isError: true,
     };
   }
@@ -835,6 +867,8 @@ async function handleCheckNameservers(args) {
     };
   }
   nsNames = [...new Set(nsNames.map((n) => n.toLowerCase().replace(/\.$/, "")))].sort();
+  const truncatedNs = nsNames.length > MAX_NS_PROBES;
+  nsNames = nsNames.slice(0, MAX_NS_PROBES);
 
   let parentSoa = null;
   try {
@@ -851,6 +885,17 @@ async function handleCheckNameservers(args) {
 
       const probes = await Promise.all(
         ips.map(async ({ ip, family }) => {
+          if (isPrivateOrReservedIp(ip)) {
+            return {
+              ip,
+              family,
+              tcp: { ok: false, ms: 0, error: "skipped (private/reserved)" },
+              soa: null,
+              soaError: "skipped (private/reserved)",
+              soaMs: null,
+              skipped: true,
+            };
+          }
           const tcp = await probeTcp(ip, 53, timeoutMs);
           let soa = null;
           let soaError = null;
@@ -884,7 +929,7 @@ async function handleCheckNameservers(args) {
   const serialConsistent = serials.size <= 1;
 
   const lines = [`🛰️  Nameserver audit for ${domain}`, ""];
-  lines.push(`NS records (${nsNames.length}):`);
+  lines.push(`NS records (${nsNames.length}${truncatedNs ? `, truncated to first ${MAX_NS_PROBES}` : ""}):`);
   for (const ns of nsNames) lines.push(`  • ${ns}`);
   lines.push("");
   lines.push("Diversity:");
@@ -926,14 +971,104 @@ async function handleCheckNameservers(args) {
   return { content: [{ type: "text", text: lines.join("\n") }] };
 }
 
+function isPrivateOrReservedIp(ip) {
+  const fam = net.isIP(ip);
+  if (fam === 0) return false;
+  if (fam === 4) {
+    const o = ip.split(".").map(Number);
+    if (o.some((n) => Number.isNaN(n))) return true;
+    if (o[0] === 0) return true;
+    if (o[0] === 10) return true;
+    if (o[0] === 127) return true;
+    if (o[0] === 169 && o[1] === 254) return true;
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;
+    if (o[0] === 192 && o[1] === 168) return true;
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;
+    if (o[0] >= 224) return true;
+    return false;
+  }
+  const norm = ip.toLowerCase();
+  if (norm === "::" || norm === "::1") return true;
+  if (norm.startsWith("fe80:")) return true;
+  if (/^f[cd][0-9a-f]{2}:/.test(norm)) return true;
+  if (norm.startsWith("ff")) return true;
+  const mapped = norm.match(/^::ffff:([0-9.]+)$/);
+  if (mapped && net.isIP(mapped[1]) === 4) return isPrivateOrReservedIp(mapped[1]);
+  return false;
+}
+
+const rateBuckets = new Map();
+
+function clientKey(req) {
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+
+function takeTokens(key, cost) {
+  const now = Date.now();
+  const b = rateBuckets.get(key) ?? { tokens: RATE_LIMIT_CAPACITY, last: now };
+  const elapsed = (now - b.last) / 1000;
+  b.tokens = Math.min(RATE_LIMIT_CAPACITY, b.tokens + elapsed * RATE_LIMIT_REFILL_PER_SEC);
+  b.last = now;
+  if (b.tokens < cost) {
+    rateBuckets.set(key, b);
+    return { ok: false, retryAfter: Math.ceil((cost - b.tokens) / RATE_LIMIT_REFILL_PER_SEC) };
+  }
+  b.tokens -= cost;
+  rateBuckets.set(key, b);
+  return { ok: true, remaining: Math.floor(b.tokens) };
+}
+
+setInterval(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [k, b] of rateBuckets) if (b.last < cutoff) rateBuckets.delete(k);
+}, 60 * 1000).unref();
+
+function bodyCost(body) {
+  const msgs = Array.isArray(body) ? body : [body];
+  let cost = 1;
+  for (const m of msgs) {
+    if (m?.method === "tools/call") {
+      cost += TOOL_COST[m?.params?.name] ?? 2;
+    }
+  }
+  return Math.max(1, Math.ceil(cost));
+}
+
+function rateLimitMiddleware(req, res, next) {
+  const cost = bodyCost(req.body);
+  const r = takeTokens(clientKey(req), cost);
+  res.setHeader("X-RateLimit-Limit", String(RATE_LIMIT_CAPACITY));
+  if (!r.ok) {
+    res.setHeader("Retry-After", String(r.retryAfter));
+    return res.status(429).json({
+      jsonrpc: "2.0",
+      error: { code: -32029, message: `Rate limit exceeded. Retry in ${r.retryAfter}s.` },
+      id: null,
+    });
+  }
+  res.setHeader("X-RateLimit-Remaining", String(r.remaining));
+  next();
+}
+
 const app = express();
-app.use(express.json());
+app.set("trust proxy", true);
+app.use(express.json({ limit: MAX_BODY_SIZE }));
+app.use((err, _req, res, next) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({
+      jsonrpc: "2.0",
+      error: { code: -32030, message: "Request body too large" },
+      id: null,
+    });
+  }
+  return next(err);
+});
 
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
 const transports = new Map();
 
-app.post("/mcp", async (req, res) => {
+app.post("/mcp", rateLimitMiddleware, async (req, res) => {
   const sessionId = req.headers["mcp-session-id"];
   let transport;
 

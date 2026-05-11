@@ -13,6 +13,25 @@ npm start
 
 The server runs on port `3000` (configurable via `PORT`).
 
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port |
+| `RATE_LIMIT_CAPACITY` | `60` | Token bucket capacity per client IP |
+| `RATE_LIMIT_REFILL_PER_SEC` | `1` | Tokens refilled per second |
+| `MAX_BODY_SIZE` | `64kb` | Maximum JSON body size on `/mcp` |
+
+## Abuse protection
+
+Because this server is intended to be exposed publicly, several mitigations are in place:
+
+- **Per-IP token-bucket rate limit** with weighted tool costs (e.g. `check_nameservers` = 10 tokens, `check_domain` = 1). Exceeding the bucket returns HTTP `429` with a `Retry-After` header and `X-RateLimit-*` response headers. `trust proxy` is enabled so the real client IP is read from `X-Forwarded-For` when running behind nginx.
+- **Body size limit** on `/mcp` (default 64 kB, returns HTTP `413`).
+- **SSRF guard**: `reverse_dns`, `dns_lookup` with `type=PTR`, and the TCP/53 + per-NS SOA probes in `check_nameservers` refuse private / loopback / link-local / CGNAT / multicast / ULA addresses (IPv4 and IPv6, including IPv4-mapped form), preventing the server from being used to scan internal networks.
+- **Fan-out caps**: `check_domains` ≤ 50 domains and concurrency ≤ 20, `suggest_domains` ≤ 30 ideas, `check_nameservers` probes at most 10 NS, `check_email_security` probes at most 10 DKIM selectors.
+- **Per-NS timeout** in `check_nameservers` is bounded (default 3 s, max 10 s).
+
 ## Endpoints
 
 - `POST /mcp` – MCP endpoint for Claude
